@@ -57,7 +57,7 @@ import Control.Monad.State
 import Data.Set (Set)
 import qualified Data.Set as Set
 
-import GHC.Exts hiding (Any)
+import GHC.Exts (IsList(..))
 import Unsafe.Coerce
 
 -- | Wrapper object holding some endomorphism without exposing its type.
