@@ -1,11 +1,11 @@
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE GADTs                  #-}
+{-# LANGUAGE Trustworthy            #-}
+{-# LANGUAGE FlexibleInstances      #-}
+{-# LANGUAGE TypeFamilies           #-}
+{-# LANGUAGE LambdaCase             #-}
+{-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableInstances   #-}
 -----------------------------------------------------------------------------
 -- |
 -- Copyright   :  (c) 2014 Jonas Scholl
@@ -50,6 +50,8 @@ import Data.List
 import Data.Data
 import Data.Monoid
 
+import qualified Data.Semigroup as S
+
 import Control.Monad
 import Control.Monad.Writer
 import Control.Monad.State
@@ -86,10 +88,13 @@ mkItem = EndoItem
 mkItemM :: (Monad m, Data a) => (a -> m a) -> EndoMItem m
 mkItemM = EndoMItem
 
+instance S.Semigroup EndoList where
+    Nil        <> b = b
+    (Cons x l) <> b = Cons x (l S.<> b)
+
 instance Monoid EndoList where
-    mempty               = Nil
-    mappend Nil        b = b
-    mappend (Cons x l) b = Cons x (mappend l b)
+    mempty  = Nil
+    mappend = (S.<>)
 
 instance IsList EndoList where
     type Item EndoList = EndoItem
@@ -98,10 +103,13 @@ instance IsList EndoList where
         Nil      -> Nothing
         Cons f l -> Just (EndoItem f, l)
 
+instance S.Semigroup (EndoListM m) where
+    NilM        <> b = b
+    (ConsM x l) <> b = ConsM x (l S.<> b)
+
 instance Monoid (EndoListM m) where
-    mempty                = NilM
-    mappend NilM        b = b
-    mappend (ConsM x l) b = ConsM x (mappend l b)
+    mempty  = NilM
+    mappend = (S.<>)
 
 instance Monad m => IsList (EndoListM m) where
     type Item (EndoListM m) = EndoMItem m
@@ -124,8 +132,8 @@ appEndoList (Cons f l) a = appEndoList l $ maybe a (unsafeCoerce . f) $ cast a
 
 -- | Same as 'appEndoList' but in a monadic context.
 appEndoListM :: (Monad m, Data a) => EndoListM m -> a -> m a
-appEndoListM NilM        a = return a
-appEndoListM (ConsM f l) a = maybe (return a) (liftM unsafeCoerce . f) (cast a) >>= appEndoListM l
+appEndoListM NilM        a = pure a
+appEndoListM (ConsM f l) a = maybe (pure a) (fmap unsafeCoerce . f) (cast a) >>= appEndoListM l
 
 -- | Class of transformations, i.e. objects containing endomorphisms.
 class Transformation d where
@@ -203,7 +211,7 @@ transform d a = case mkEndoList d of
 
 -- | Same as 'transform' but with a monadic function. Calls 'fail' instead of
 --   'error' if a type-error is detected.
-transformM :: (MonadicTransformation d m, Data a) => d -> a -> m a
+transformM :: (MonadicTransformation d m, Data a, MonadFail m) => d -> a -> m a
 transformM d a = case mkEndoListM d of
     f -> case getNeededTypeRepsM f `Set.difference` allContainedTypeReps a of
         s | not (Set.null s) -> fail $ "Data.DataTraverse.transformM: Could not find all needed types when mapping over a value of type " ++ show (typeOf a) ++ ". Types of missing terms: " ++ show (Set.toList s)
@@ -263,7 +271,7 @@ getSubterms' = getSubtermsBy (const True)
 --   >>> getSubtermsBy (<6) (3, 4.0, True, 'c', (False, (True, 5, 6)))
 --   [3, 5]
 getSubtermsBy :: (Data a, Data b) => (b -> Bool) -> a -> [b]
-getSubtermsBy p = getSubtermsWith (\ x -> guard (p x) >> return [x])
+getSubtermsBy p = getSubtermsWith (\ x -> guard (p x) >> pure [x])
 
 -- | Returns all sub-terms (intermediate and non intermediate) of some type of a
 --   value which could be transformed to some 'Monoid'.
@@ -272,10 +280,25 @@ getSubtermsBy p = getSubtermsWith (\ x -> guard (p x) >> return [x])
 --
 --   Example:
 --
---   >>> getSubtermsWith (\ x -> guard (x < 6) >> return [x]) (3, 4.0, True, 'c', (False, (True, 5, 6)))
+--   >>> getSubtermsWith (\ x -> guard (x < 6) >> pure [x]) (3, 4.0, True, 'c', (False, (True, 5, 6)))
 --   [3, 5]
 getSubtermsWith :: (Data a, Data b, Monoid m) => (b -> Maybe m) -> a -> m
-getSubtermsWith p = execWriter . transformM (\ x -> maybe (return ()) tell (p x) >> return x)
+getSubtermsWith p = runErrorIdentity . execWriterT . transformM (\ x -> maybe (pure ()) tell (p x) >> pure x)
+
+newtype ErrorIdentity a = ErrorIdentity { runErrorIdentity :: a }
+
+instance Functor ErrorIdentity where
+    fmap f (ErrorIdentity a) = ErrorIdentity (f a)
+
+instance Applicative ErrorIdentity where
+    pure = ErrorIdentity
+    (ErrorIdentity f) <*> (ErrorIdentity a) = ErrorIdentity (f a)
+
+instance Monad ErrorIdentity where
+    (ErrorIdentity a) >>= f = f a
+
+instance MonadFail ErrorIdentity where
+    fail = error
 
 ------------------
 -- * Type checking
@@ -300,7 +323,7 @@ allContainedTypeReps' a = do
     where
         helper :: Data a => a -> State (Set TypeRep) ()
         helper x = do
-            let subterms = execWriter $ gmapM (\ y -> tell [WrappedData y] >> return y) x
+            let subterms = execWriter $ gmapM (\ y -> tell [WrappedData y] >> pure y) x
             mapM_ (\ (WrappedData y) -> allContainedTypeReps' y) subterms
 
 -- | Construct a list of empty values, one for each constructor found in the data type.
